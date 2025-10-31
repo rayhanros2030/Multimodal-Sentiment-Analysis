@@ -21,9 +21,7 @@ See `requirements.txt` for full dependencies.
 
 ## Demo Visualizations
 
-**Interactive Demo Available:**
-- **[View Demo in Browser](demo.html)** - Click to open interactive demonstration
-- **Demo Visualization:** [demo_video_frame.png](demo_video_frame.png)
+**Demo Visualization:** [demo_video_frame.png](demo_video_frame.png)
 
 The demo shows:
 - Feature extraction from all three modalities
