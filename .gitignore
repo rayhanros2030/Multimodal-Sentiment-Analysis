@@ -41,14 +41,17 @@ env/
 
 # Results and outputs
 *.json
-*.jpg
-*.jpeg
 *.csv
-# Allow demo files
+# Allow demo files and visualizations
 !demo.html
 !demo_video_frame.png
 !demo_simple.png
 !demo_visualization.png
+!mosei_training_metrics.png
+!Multimodal_Sentiment_Architecture.jpg
+!*.png
+!*.jpg
+!*.jpeg
 !*.txt
 !requirements.txt
 
