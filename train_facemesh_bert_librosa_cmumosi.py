@@ -31,19 +31,33 @@ from train_mosei_only import RegularizedMultimodalModel, ImprovedCorrelationLoss
 class FeatureAdapter(nn.Module):
     """Adapts FaceMesh/BERT/Librosa features to match CMU-MOSEI feature spaces"""
     
-    def __init__(self, input_dim: int, target_dim: int, hidden_dim: int = 256):
+    def __init__(self, input_dim: int, target_dim: int, hidden_dim: int = 512):
         super().__init__()
-        self.adaptation = nn.Sequential(
+        # Use deeper architecture for large dimension gaps (e.g., 65→713)
+        if target_dim / input_dim > 5:  # Large expansion
+            hidden_dim = max(hidden_dim, target_dim // 2)
+        
+        layers = []
+        # Input layer
+        layers.extend([
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.3)
+        ])
+        
+        # Hidden layer
+        layers.extend([
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, target_dim)
-        )
+            nn.Dropout(0.3)
+        ])
+        
+        # Output layer
+        layers.append(nn.Linear(hidden_dim, target_dim))
+        
+        self.adaptation = nn.Sequential(*layers)
     
     def forward(self, x):
         if x.dim() == 1:
@@ -317,10 +331,16 @@ class FeatureDistillationTrainer:
         self.mosei_dir = Path(mosei_dir)
         self.mosei_targets = self._load_mosei_targets()
         
-        # Initialize adapters
-        self.visual_adapter = FeatureAdapter(65, 713).to('cuda' if torch.cuda.is_available() else 'cpu')
-        self.audio_adapter = FeatureAdapter(74, 74).to('cuda' if torch.cuda.is_available() else 'cpu')  # Same dim
-        self.text_adapter = FeatureAdapter(768, 300).to('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
+        
+        # Initialize adapters with appropriate capacities
+        # FaceMesh (65) -> OpenFace2 (713): Large gap, needs larger hidden dim
+        self.visual_adapter = FeatureAdapter(65, 713, hidden_dim=512).to(device)
+        # Librosa (74) -> COVAREP (74): Same dim, simpler adapter
+        self.audio_adapter = FeatureAdapter(74, 74, hidden_dim=256).to(device)
+        # BERT (768) -> GloVe (300): Reduction, moderate adapter
+        self.text_adapter = FeatureAdapter(768, 300, hidden_dim=384).to(device)
     
     def _load_mosei_targets(self) -> Dict:
         """Load CMU-MOSEI features as target distributions"""
@@ -494,28 +514,77 @@ def test_on_mosi(mosi_dataset: CMUMOSIDataset, adapters: Tuple, model_path: str 
 
 
 def main():
-    mosei_dir = "C:/Users/PC/Downloads/CMU-MOSEI"
-    mosi_dir = "C:/Users/PC/Downloads/CMU-MOSI Dataset"
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train FaceMesh/BERT/Librosa adapters')
+    parser.add_argument('--mosei_dir', type=str, 
+                       default="C:/Users/PC/Downloads/CMU-MOSEI",
+                       help='Path to CMU-MOSEI directory')
+    parser.add_argument('--mosi_dir', type=str,
+                       default="C:/Users/PC/Downloads/CMU-MOSI Dataset",
+                       help='Path to CMU-MOSI directory')
+    parser.add_argument('--max_samples', type=int, default=10,
+                       help='Maximum samples to process (start small for testing)')
+    parser.add_argument('--epochs', type=int, default=20,
+                       help='Number of training epochs for adapters')
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Path to pretrained model checkpoint')
+    
+    args = parser.parse_args()
     
     print("="*80)
     print("FaceMesh + BERT + Librosa Feature Adaptation")
     print("Using CMU-MOSEI as targets, testing on CMU-MOSI")
     print("="*80)
+    print(f"MOSEI Dir: {args.mosei_dir}")
+    print(f"MOSI Dir: {args.mosi_dir}")
+    print(f"Max Samples: {args.max_samples}")
+    print("="*80)
+    
+    # Check paths exist
+    if not Path(args.mosei_dir).exists():
+        print(f"ERROR: MOSEI directory not found: {args.mosei_dir}")
+        return
+    
+    if not Path(args.mosi_dir).exists():
+        print(f"ERROR: MOSI directory not found: {args.mosi_dir}")
+        return
     
     # Initialize
-    trainer = FeatureDistillationTrainer(mosei_dir)
-    mosi_dataset = CMUMOSIDataset(mosi_dir, max_samples=50)  # Start small
+    print("\nInitializing trainer...")
+    trainer = FeatureDistillationTrainer(args.mosei_dir)
+    
+    print(f"\nLoading CMU-MOSI dataset (max {args.max_samples} samples)...")
+    mosi_dataset = CMUMOSIDataset(args.mosi_dir, max_samples=args.max_samples)
+    
+    if len(mosi_dataset) == 0:
+        print("ERROR: No CMU-MOSI samples loaded. Check dataset structure and paths.")
+        return
     
     # Train adapters
-    adapters = trainer.train_adapters(mosi_dataset, epochs=20)
+    print("\n" + "="*80)
+    print("Training Feature Adapters")
+    print("="*80)
+    adapters = trainer.train_adapters(mosi_dataset, epochs=args.epochs)
+    
+    # Save adapters
+    print("\nSaving trained adapters...")
+    torch.save(trainer.visual_adapter.state_dict(), 'visual_adapter.pth')
+    torch.save(trainer.audio_adapter.state_dict(), 'audio_adapter.pth')
+    torch.save(trainer.text_adapter.state_dict(), 'text_adapter.pth')
+    print("Adapters saved!")
     
     # Test
-    results = test_on_mosi(mosi_dataset, adapters)
+    print("\n" + "="*80)
+    print("Testing on CMU-MOSI")
+    print("="*80)
+    results = test_on_mosi(mosi_dataset, adapters, args.model_path)
     
     with open('cmumosi_adapted_results.json', 'w') as f:
         json.dump(results, f, indent=2)
     
     print("\nResults saved to cmumosi_adapted_results.json")
+    print("="*80)
 
 
 if __name__ == "__main__":
