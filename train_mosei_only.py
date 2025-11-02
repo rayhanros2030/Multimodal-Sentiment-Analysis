@@ -109,10 +109,10 @@ class RegularizedMultimodalModel(nn.Module):
 class ImprovedCorrelationLoss(nn.Module):
     """Improved loss function"""
     
-    def __init__(self, alpha=0.4, beta=0.6):
+    def __init__(self, alpha=0.3, beta=0.7):
         super().__init__()
-        self.alpha = alpha
-        self.beta = beta
+        self.alpha = alpha  # Less weight on MSE/MAE
+        self.beta = beta    # More weight on correlation (for higher correlation)
         self.mse = nn.MSELoss()
         self.mae = nn.L1Loss()
     
@@ -127,7 +127,8 @@ class ImprovedCorrelationLoss(nn.Module):
         denominator = pred_std * target_std
         
         correlation = numerator / denominator
-        return 1 - correlation
+        # Use squared correlation loss for stronger gradient signal
+        return (1 - correlation) ** 2
     
     def forward(self, pred, target):
         mse_loss = self.mse(pred, target)
@@ -278,7 +279,7 @@ class MOSEIDataset(Dataset):
         return features.astype(np.float32)
     
     def _extract_sentiment(self, data: Dict) -> float:
-        """Extract sentiment score"""
+        """Extract sentiment score - IMPROVED: Uses mean of all segments"""
         if data is None or 'features' not in data:
             return 0.0
         
@@ -286,7 +287,9 @@ class MOSEIDataset(Dataset):
         
         try:
             if len(features.shape) > 1:
-                sentiment = float(features[0, 0])
+                # IMPROVEMENT: Use mean of all segments (better than just first segment)
+                # Column 0 contains sentiment scores for each segment
+                sentiment = float(np.mean(features[:, 0])) if features.shape[1] > 0 else 0.0
             else:
                 sentiment = float(features[0]) if len(features) > 0 else 0.0
         except:
@@ -475,16 +478,17 @@ def train_model():
     print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     
     # Create model
+    # Slightly larger model for better capacity
     model = RegularizedMultimodalModel(
         visual_dim=713, audio_dim=74, text_dim=300,
-        hidden_dim=192, embed_dim=96, dropout=0.7, num_layers=2
+        hidden_dim=224, embed_dim=112, dropout=0.65, num_layers=2
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Training setup
-    criterion = ImprovedCorrelationLoss(alpha=0.4, beta=0.6)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
+    # Training setup - optimized for correlation
+    criterion = ImprovedCorrelationLoss(alpha=0.3, beta=0.7)  # More focus on correlation
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0008, weight_decay=0.04)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=7)
     
     best_correlation = -1.0
