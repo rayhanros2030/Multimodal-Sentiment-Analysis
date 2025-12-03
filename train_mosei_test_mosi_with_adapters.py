@@ -1,19 +1,18 @@
 """
-Train on CMU-MOSEI pre-extracted features, then test on CMU-MOSI 
-using Librosa, FaceMesh, and BERT with feature adapters.
+Train on CMU-MOSEI pre-extracted features, then test on CMU-MOSI
+using FaceMesh, BERT, and Librosa with feature adapters.
 
-Workflow:
-1. Train model on MOSEI (OpenFace2, COVAREP, GloVe)
-2. Train adapters: Librosa→COVAREP, FaceMesh→OpenFace2, BERT→GloVe
-3. Extract features from MOSI using Librosa/FaceMesh/BERT
-4. Adapt features and test with trained model
+Pipeline:
+1. Train model on CMU-MOSEI (OpenFace2, COVAREP, GloVe)
+2. Train adapters: FaceMesh→OpenFace2, BERT→GloVe, Librosa→COVAREP
+3. Test on CMU-MOSI using adapted features
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import h5py
 from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer, BertModel
@@ -25,47 +24,54 @@ import json
 import sys
 from scipy.stats import pearsonr
 from sklearn.preprocessing import RobustScaler
+from sklearn.cluster import KMeans
 
-# Import your original model
+# Import original model
 sys.path.append(str(Path(__file__).parent))
 from train_mosei_only import RegularizedMultimodalModel, ImprovedCorrelationLoss
 
-# Set seeds
-torch.manual_seed(42)
-np.random.seed(42)
-
+# Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-
 class FeatureAdapter(nn.Module):
-    """Adapts Librosa/FaceMesh/BERT features to match MOSEI feature spaces"""
+    """Adapts FaceMesh/BERT/Librosa features to match CMU-MOSEI feature spaces"""
     
     def __init__(self, input_dim: int, target_dim: int, hidden_dim: int = 512):
         super().__init__()
-        # Use deeper architecture for large dimension gaps
-        if target_dim / input_dim > 5:  # Large expansion
-            hidden_dim = max(hidden_dim, target_dim // 2)
         
         layers = []
-        # Input layer
-        layers.extend([
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        ])
         
-        # Hidden layer
-        layers.extend([
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        ])
-        
-        # Output layer
-        layers.append(nn.Linear(hidden_dim, target_dim))
+        # For large dimension gaps (e.g., 65→713), use deeper architecture
+        if target_dim / input_dim > 5:  # Large expansion like 65→713
+            # Deeper network for visual adapter
+            dims = [input_dim, 128, 256, 512, 1024, target_dim]
+            for i in range(len(dims) - 1):
+                layers.append(nn.Linear(dims[i], dims[i+1]))
+                if i < len(dims) - 2:  # No BatchNorm/activation on last layer
+                    layers.append(nn.BatchNorm1d(dims[i+1]) if dims[i+1] > 1 else nn.Identity())
+                    layers.append(nn.ReLU())
+                    layers.append(nn.Dropout(0.3))
+        else:
+            # Standard architecture for smaller gaps
+            # Input layer
+            layers.extend([
+                nn.Linear(input_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            ])
+            
+            # Hidden layer
+            layers.extend([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim) if hidden_dim > 1 else nn.Identity(),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            ])
+            
+            # Output layer
+            layers.append(nn.Linear(hidden_dim, target_dim))
         
         self.adaptation = nn.Sequential(*layers)
     
@@ -78,62 +84,12 @@ class FeatureAdapter(nn.Module):
 class MOSEIDataset(Dataset):
     """CMU-MOSEI Dataset with pre-extracted features"""
     
-    def __init__(self, mosei_dir: str, max_samples: int = None):
+    def __init__(self, mosei_dir: str, max_samples: Optional[int] = None):
         self.mosei_dir = Path(mosei_dir)
         self.max_samples = max_samples
         self.samples = self._load_mosei_data()
         
-    def _load_mosei_data(self) -> List[Dict]:
-        """Load CMU-MOSEI pre-extracted features"""
-        samples = []
-        
-        visual_path = self.mosei_dir / 'visuals' / 'CMU_MOSEI_VisualOpenFace2.csd'
-        audio_path = self.mosei_dir / 'acoustics' / 'CMU_MOSEI_COVAREP.csd'
-        text_path = self.mosei_dir / 'languages' / 'CMU_MOSEI_TimestampedWordVectors.csd'
-        labels_path = self.mosei_dir / 'labels' / 'CMU_MOSEI_Labels.csd'
-        
-        if not all([visual_path.exists(), audio_path.exists(), text_path.exists(), labels_path.exists()]):
-            print(f"ERROR: MOSEI files not found!")
-            return []
-        
-        print("  Loading visual features...")
-        visual_data = self._load_csd_file(visual_path, 'OpenFace_2') or self._load_csd_file(visual_path, 'Visual')
-        print("  Loading audio features...")
-        audio_data = self._load_csd_file(audio_path, 'COVAREP') or self._load_csd_file(audio_path, 'Audio')
-        print("  Loading text features...")
-        text_data = self._load_csd_file(text_path, 'glove_vectors') or self._load_csd_file(text_path, 'Text')
-        print("  Loading labels...")
-        labels_data = self._load_csd_file(labels_path, 'All Labels') or self._load_csd_file(labels_path, 'Sentiment')
-        
-        common_ids = set(visual_data.keys()) & set(audio_data.keys()) & set(text_data.keys()) & set(labels_data.keys())
-        print(f"Found {len(common_ids)} common video IDs")
-        
-        for vid_id in list(common_ids)[:self.max_samples] if self.max_samples else common_ids:
-            try:
-                visual_feat = self._extract_features(visual_data[vid_id], 713)
-                audio_feat = self._extract_features(audio_data[vid_id], 74)
-                text_feat = self._extract_features(text_data[vid_id], 300)
-                sentiment = self._extract_sentiment(labels_data[vid_id])
-                
-                visual_feat = self._clean_features(visual_feat)
-                audio_feat = self._clean_features(audio_feat)
-                text_feat = self._clean_features(text_feat)
-                sentiment = self._clean_sentiment(sentiment)
-                
-                if (np.all(visual_feat == 0) and np.all(audio_feat == 0) and np.all(text_feat == 0)):
-                    continue
-                
-                samples.append({
-                    'visual': visual_feat,
-                    'audio': audio_feat,
-                    'text': text_feat,
-                    'sentiment': sentiment
-                })
-            except Exception:
-                continue
-        
-        print(f"Loaded {len(samples)} MOSEI samples")
-        return samples
+        print(f"Loaded {len(self.samples)} CMU-MOSEI samples")
     
     def _load_csd_file(self, path: Path, key: str) -> Dict:
         """Load .csd file"""
@@ -201,19 +157,62 @@ class MOSEIDataset(Dataset):
         except:
             sentiment = 0.0
         
-        return sentiment
-    
-    def _clean_features(self, features: np.ndarray) -> np.ndarray:
-        """Clean features"""
-        features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
-        features = np.clip(features, -1000, 1000)
-        return features
-    
-    def _clean_sentiment(self, sentiment: float) -> float:
-        """Clean sentiment value"""
-        if np.isnan(sentiment) or np.isinf(sentiment):
-            return 0.0
+        # Clip to [-3, 3]
         return float(np.clip(sentiment, -3.0, 3.0))
+    
+    def _load_mosei_data(self) -> List[Dict]:
+        """Load CMU-MOSEI data"""
+        samples = []
+        
+        visual_path = self.mosei_dir / 'visuals' / 'CMU_MOSEI_VisualOpenFace2.csd'
+        audio_path = self.mosei_dir / 'acoustics' / 'CMU_MOSEI_COVAREP.csd'
+        text_path = self.mosei_dir / 'languages' / 'CMU_MOSEI_TimestampedWordVectors.csd'
+        labels_path = self.mosei_dir / 'labels' / 'CMU_MOSEI_Labels.csd'
+        
+        if not all([visual_path.exists(), audio_path.exists(), text_path.exists(), labels_path.exists()]):
+            print(f"ERROR: MOSEI files not found!")
+            return []
+        
+        print("  Loading visual features...")
+        visual_data = self._load_csd_file(visual_path, 'OpenFace_2') or self._load_csd_file(visual_path, 'Visual')
+        print("  Loading audio features...")
+        audio_data = self._load_csd_file(audio_path, 'COVAREP') or self._load_csd_file(audio_path, 'Audio')
+        print("  Loading text features...")
+        text_data = self._load_csd_file(text_path, 'glove_vectors') or self._load_csd_file(text_path, 'Text')
+        print("  Loading labels...")
+        labels_data = self._load_csd_file(labels_path, 'All Labels') or self._load_csd_file(labels_path, 'Sentiment')
+        
+        common_ids = set(visual_data.keys()) & set(audio_data.keys()) & set(text_data.keys()) & set(labels_data.keys())
+        print(f"Found {len(common_ids)} common video IDs")
+        
+        for vid_id in list(common_ids)[:self.max_samples] if self.max_samples else common_ids:
+            try:
+                visual_feat = self._extract_features(visual_data[vid_id], 713)
+                audio_feat = self._extract_features(audio_data[vid_id], 74)
+                text_feat = self._extract_features(text_data[vid_id], 300)
+                sentiment = self._extract_sentiment(labels_data[vid_id])
+                
+                # Clean features
+                visual_feat = np.nan_to_num(visual_feat, nan=0.0, posinf=1.0, neginf=-1.0)
+                audio_feat = np.nan_to_num(audio_feat, nan=0.0, posinf=1.0, neginf=-1.0)
+                text_feat = np.nan_to_num(text_feat, nan=0.0, posinf=1.0, neginf=-1.0)
+                visual_feat = np.clip(visual_feat, -1000, 1000)
+                audio_feat = np.clip(audio_feat, -1000, 1000)
+                text_feat = np.clip(text_feat, -1000, 1000)
+                
+                if (np.all(visual_feat == 0) and np.all(audio_feat == 0) and np.all(text_feat == 0)):
+                    continue
+                
+                samples.append({
+                    'audio': audio_feat,
+                    'visual': visual_feat,
+                    'text': text_feat,
+                    'sentiment': sentiment
+                })
+            except Exception as e:
+                continue
+        
+        return samples
     
     def __len__(self):
         return len(self.samples)
@@ -229,9 +228,9 @@ class MOSEIDataset(Dataset):
 
 
 class MOSIDataset(Dataset):
-    """CMU-MOSI Dataset with Librosa, FaceMesh, and BERT extraction"""
+    """CMU-MOSI Dataset with FaceMesh, BERT, and Librosa extraction"""
     
-    def __init__(self, mosi_dir: str, max_samples: int = None):
+    def __init__(self, mosi_dir: str, max_samples: Optional[int] = None):
         self.mosi_dir = Path(mosi_dir)
         self.max_samples = max_samples
         
@@ -260,68 +259,252 @@ class MOSIDataset(Dataset):
         """Load CMU-MOSI data with video/audio/transcript paths"""
         samples = []
         
-        # CMU-MOSI structure (adjust paths as needed)
-        video_dir = self.mosi_dir / "MOSI-Videos"
-        audio_dir = self.mosi_dir / "MOSI-Audios"
-        transcript_dir = self.mosi_dir / "MOSI-Transcript"
-        labels_path = self.mosi_dir / "labels.json"
+        # Try different possible folder structures
+        possible_video_dirs = [
+            self.mosi_dir / 'MOSI-VIDS',  # Primary location (93 MP4 files here)
+            self.mosi_dir / 'MOSI-Videos',
+            self.mosi_dir / 'videos',
+            self.mosi_dir / 'video',
+            self.mosi_dir
+        ]
+        possible_audio_dirs = [
+            self.mosi_dir / 'MOSI-AUDIO',  # Primary location (WAV files moved here)
+            self.mosi_dir / 'MOSI-VIDS',  # Fallback location
+            self.mosi_dir / 'audios',
+            self.mosi_dir / 'audio',
+            self.mosi_dir / 'MOSI-Audios',
+            self.mosi_dir
+        ]
+        possible_transcript_dirs = [
+            self.mosi_dir / 'transcripts',
+            self.mosi_dir / 'transcript',
+            self.mosi_dir / 'MOSI-Transcript',
+            self.mosi_dir
+        ]
+        possible_label_dirs = [
+            self.mosi_dir / 'labels',
+            self.mosi_dir / 'label',
+            self.mosi_dir
+        ]
         
-        # Alternative structure
-        if not video_dir.exists():
-            video_dir = self.mosi_dir / "videos"
-            audio_dir = self.mosi_dir / "audios"
-            transcript_dir = self.mosi_dir / "transcripts"
-            labels_path = self.mosi_dir / "labels.json"
+        video_dir = None
+        audio_dir = None
+        transcript_dir = None
+        label_dir = None
         
-        if not video_dir.exists():
-            print(f"Warning: CMU-MOSI video directory not found at {self.mosi_dir}")
-            print("Looking for video files in root directory...")
+        for vd in possible_video_dirs:
+            if vd.exists():
+                print(f"  Checking {vd}...")
+                mp4_files = list(vd.rglob('*.mp4'))  # Use recursive from start
+                avi_files = list(vd.rglob('*.avi'))
+                # Also check other video formats
+                mov_files = list(vd.rglob('*.mov'))
+                mkv_files = list(vd.rglob('*.mkv'))
+                # Remove duplicates
+                all_video_files = list(set(mp4_files + avi_files + mov_files + mkv_files))
+                
+                # Check for ZIP files (common in CMU-MOSI dataset)
+                zip_files = list(vd.rglob('*.zip'))
+                if zip_files and not all_video_files:
+                    print(f"  WARNING: Found {len(zip_files)} ZIP files but no extracted video files!")
+                    print(f"  The CMU-MOSI dataset appears to be compressed.")
+                    print(f"  Please extract the ZIP files in {vd} to get .mp4/.avi files.")
+                    print(f"  Example ZIP files found:")
+                    for zf in zip_files[:3]:
+                        print(f"    - {zf.name}")
+                
+                if all_video_files:
+                    video_dir = vd
+                    print(f"Found video directory: {video_dir}")
+                    print(f"  - {len(mp4_files)} MP4 files")
+                    print(f"  - {len(avi_files)} AVI files")
+                    print(f"  - {len(mov_files)} MOV files")
+                    print(f"  - {len(mkv_files)} MKV files")
+                    print(f"  - Total: {len(all_video_files)} video files")
+                    break
+                else:
+                    print(f"  No video files found in {vd}")
+        
+        for ad in possible_audio_dirs:
+            if ad.exists():
+                wav_files = list(ad.glob('*.wav')) + list(ad.rglob('*.wav'))
+                if wav_files:
+                    audio_dir = ad
+                    print(f"Found audio directory: {audio_dir} ({len(set(wav_files))} WAV files)")
+                    break
+        
+        for td in possible_transcript_dirs:
+            if td.exists():
+                txt_files = list(td.glob('*.txt')) + list(td.rglob('*.txt'))
+                textonly_files = list(td.glob('*.textonly')) + list(td.rglob('*.textonly'))
+                all_transcript_files = txt_files + textonly_files
+                if all_transcript_files:
+                    transcript_dir = td
+                    print(f"Found transcript directory: {transcript_dir}")
+                    print(f"  - {len(set(txt_files))} TXT files")
+                    print(f"  - {len(set(textonly_files))} .textonly files")
+                    print(f"  - Total: {len(set(all_transcript_files))} transcript files")
+                    break
+        
+        for ld in possible_label_dirs:
+            if ld.exists():
+                label_dir = ld
+                break
+        
+        if not video_dir:
+            print(f"Warning: CMU-MOSI video directory not found. Looking in root and recursively...")
             video_files = list(self.mosi_dir.glob('*.mp4')) + list(self.mosi_dir.glob('*.avi'))
-            audio_files = list(self.mosi_dir.glob('*.wav')) if audio_dir.exists() else []
-            transcript_files = list(self.mosi_dir.glob('*.txt')) if transcript_dir.exists() else []
+            # Also try recursive search
+            if not video_files:
+                video_files = list(self.mosi_dir.rglob('*.mp4')) + list(self.mosi_dir.rglob('*.avi'))
+                if video_files:
+                    print(f"Found {len(video_files)} video files via recursive search")
         else:
-            video_files = list(video_dir.glob('*.mp4')) + list(video_dir.glob('*.avi'))
-            audio_files = list(audio_dir.glob('*.wav')) if audio_dir.exists() else []
-            transcript_files = list(transcript_dir.glob('*.txt')) if transcript_dir.exists() else []
+            # Use recursive search within the found directory
+            video_files = (list(video_dir.rglob('*.mp4')) + 
+                          list(video_dir.rglob('*.avi')) +
+                          list(video_dir.rglob('*.mov')) +
+                          list(video_dir.rglob('*.mkv')))
+            # Remove duplicates
+            video_files = list(set(video_files))
+            print(f"Using {len(video_files)} video files from {video_dir}")
         
-        # Load labels if available
-        labels_dict = {}
-        if labels_path.exists():
-            try:
-                with open(labels_path, 'r') as f:
-                    labels_dict = json.load(f)
-            except:
-                pass
+        # If no video files, try to use audio files as primary source
+        if not video_files:
+            print(f"\n⚠️  No video files found. Using audio files as primary identifier...")
+            # Get all audio files
+            if audio_dir:
+                all_audio_files = list(audio_dir.rglob('*.wav'))
+            else:
+                all_audio_files = list(self.mosi_dir.rglob('*.wav'))
+            
+            if all_audio_files:
+                print(f"Found {len(all_audio_files)} audio files. Using them to create samples (video will be None).")
+                # Create sample IDs from audio files
+                audio_file_ids = {}
+                for audio_file in all_audio_files[:self.max_samples] if self.max_samples else all_audio_files:
+                    # Extract ID from filename (remove extension)
+                    audio_id = audio_file.stem
+                    audio_file_ids[audio_id] = audio_file
+                
+                # Now create samples using audio files
+                for audio_id, audio_file in audio_file_ids.items():
+                    # Find transcript
+                    transcript_file = None
+                    if transcript_dir:
+                        transcript_file = (next((f for f in transcript_dir.rglob(f"*{audio_id}*.txt")), None) or
+                                         next((f for f in transcript_dir.rglob(f"*{audio_id}*.textonly")), None))
+                    if not transcript_file:
+                        transcript_file = (next((f for f in self.mosi_dir.rglob(f"*{audio_id}*.txt")), None) or
+                                         next((f for f in self.mosi_dir.rglob(f"*{audio_id}*.textonly")), None))
+                    
+                    # Get label
+                    label_value = None
+                    if label_dir and (label_dir / 'labels.json').exists():
+                        try:
+                            with open(label_dir / 'labels.json', 'r') as f:
+                                labels_json = json.load(f)
+                                if audio_id in labels_json:
+                                    label_value = labels_json[audio_id]
+                                else:
+                                    for key in labels_json.keys():
+                                        if audio_id in key or key in audio_id:
+                                            label_value = labels_json[key]
+                                            break
+                        except:
+                            pass
+                    
+                    samples.append({
+                        'video': None,  # No video available
+                        'audio': audio_file,
+                        'transcript': transcript_file if transcript_file and transcript_file.exists() else None,
+                        'label': label_dir / 'labels.json' if label_value is not None else None,
+                        'label_value': label_value,
+                        'id': audio_id
+                    })
+                
+                print(f"Created {len(samples)} samples from audio files (video=None)")
+                return samples
+            else:
+                print(f"\nERROR: No video files AND no audio files found!")
+                return []
         
         # Match files by ID
         for vid_file in video_files[:self.max_samples] if self.max_samples else video_files:
             vid_id = vid_file.stem
             
-            # Find corresponding files
-            audio_file = next((f for f in audio_files if vid_id in f.stem), None)
-            if not audio_file and audio_dir.exists():
-                audio_file = audio_dir / f"{vid_id}.wav"
+            # Find corresponding files (try recursive search in directories)
+            audio_file = None
+            if audio_dir:
+                audio_file = next((f for f in audio_dir.rglob(f"*{vid_id}*.wav")), None)
+            if not audio_file:
+                audio_file = next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.wav")), None)
             
-            transcript_file = next((f for f in transcript_files if vid_id in f.stem), None)
-            if not transcript_file and transcript_dir.exists():
-                transcript_file = transcript_dir / f"{vid_id}.txt"
+            transcript_file = None
+            if transcript_dir:
+                # Try both .txt and .textonly extensions
+                transcript_file = (next((f for f in transcript_dir.rglob(f"*{vid_id}*.txt")), None) or
+                                 next((f for f in transcript_dir.rglob(f"*{vid_id}*.textonly")), None))
+            if not transcript_file:
+                transcript_file = (next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.txt")), None) or
+                                 next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.textonly")), None))
             
-            sentiment = labels_dict.get(vid_id, 0.0) if labels_dict else 0.0
+            label_file = None
+            if label_dir:
+                label_file = next((f for f in label_dir.rglob(f"*{vid_id}*.txt")), None)
             
-            if audio_file and audio_file.exists():
+            # Try to load label from JSON if available
+            label_value = None
+            if label_dir and (label_dir / 'labels.json').exists():
+                try:
+                    with open(label_dir / 'labels.json', 'r') as f:
+                        labels_json = json.load(f)
+                        # Try different ID formats (with/without extension, partial matches)
+                        if vid_id in labels_json:
+                            label_value = labels_json[vid_id]
+                        else:
+                            # Try to find partial match
+                            for key in labels_json.keys():
+                                if vid_id in key or key in vid_id:
+                                    label_value = labels_json[key]
+                                    break
+                except Exception as e:
+                    pass
+            
+            # Be more lenient - allow samples with just audio + transcript (no video needed for testing)
+            # Match audio files by ID if no video files found
+            if not video_files:
+                # Use audio files as primary identifier
+                audio_file = next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.wav")), None)
+                if audio_file and audio_file.exists():
+                    # Get transcript for this audio ID
+                    transcript_file = (next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.txt")), None) or
+                                     next((f for f in self.mosi_dir.rglob(f"*{vid_id}*.textonly")), None))
+                    
+                    samples.append({
+                        'video': None,  # No video file
+                        'audio': audio_file,
+                        'transcript': transcript_file if transcript_file and transcript_file.exists() else None,
+                        'label': label_file if label_file and label_file.exists() else (label_dir / 'labels.json' if label_value is not None else None),
+                        'label_value': label_value,
+                        'id': vid_id
+                    })
+            elif vid_file and vid_file.exists():
                 samples.append({
                     'video': vid_file,
-                    'audio': audio_file if audio_file.exists() else None,
+                    'audio': audio_file if audio_file and audio_file.exists() else None,
                     'transcript': transcript_file if transcript_file and transcript_file.exists() else None,
-                    'sentiment': sentiment,
+                    'label': label_file if label_file and label_file.exists() else (label_dir / 'labels.json' if label_value is not None else None),
+                    'label_value': label_value,
                     'id': vid_id
                 })
         
         return samples
     
-    def extract_facemesh_features(self, video_path: Path) -> np.ndarray:
+    def extract_facemesh_features(self, video_path: Optional[Path]) -> np.ndarray:
         """Extract FaceMesh features from video"""
-        if not video_path.exists():
+        if not video_path or not video_path.exists():
+            # Return zeros if no video available
             return np.zeros(65, dtype=np.float32)
         
         cap = cv2.VideoCapture(str(video_path))
@@ -433,12 +616,13 @@ class MOSIDataset(Dataset):
         except Exception as e:
             return np.zeros(74, dtype=np.float32)
     
-    def extract_bert_features(self, transcript_path: Path) -> np.ndarray:
+    def extract_bert_features(self, transcript_path: Optional[Path]) -> np.ndarray:
         """Extract BERT features from transcript"""
         if not transcript_path or not transcript_path.exists():
             return np.zeros(768, dtype=np.float32)
         
         try:
+            # Handle both .txt and .textonly files
             with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read().strip()
             
@@ -467,152 +651,49 @@ class MOSIDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        # Extract features
-        visual_feat = self.extract_facemesh_features(sample['video'])
-        audio_feat = self.extract_librosa_features(sample['audio'])
-        text_feat = self.extract_bert_features(sample['transcript'])
+        # Extract features (with fallbacks if files missing)
+        # Visual: Only if video file exists, otherwise use zeros
+        visual_feat = self.extract_facemesh_features(sample.get('video')) if sample.get('video') else np.zeros(65, dtype=np.float32)
+        # Audio: Extract if file exists
+        audio_feat = self.extract_librosa_features(sample['audio']) if sample['audio'] else np.zeros(74, dtype=np.float32)
+        # Text: Extract if transcript exists
+        text_feat = self.extract_bert_features(sample['transcript']) if sample['transcript'] else np.zeros(768, dtype=np.float32)
+        
+        # Load label
+        sentiment = 0.0
+        # First try label_value from JSON
+        if 'label_value' in sample and sample['label_value'] is not None:
+            try:
+                sentiment = float(sample['label_value'])
+            except:
+                pass
+        # Otherwise try label file
+        elif sample['label']:
+            try:
+                if isinstance(sample['label'], Path) and sample['label'].name == 'labels.json':
+                    # Label is the JSON file, value already in label_value
+                    pass
+                else:
+                    with open(sample['label'], 'r') as f:
+                        sentiment = float(f.read().strip())
+            except:
+                pass
         
         return {
             'visual': torch.FloatTensor(visual_feat),
             'audio': torch.FloatTensor(audio_feat),
             'text': torch.FloatTensor(text_feat),
-            'sentiment': sample['sentiment'],
+            'sentiment': sentiment,
             'id': sample['id']
         }
 
 
-class AdapterTrainer:
-    """Train adapters using MOSEI features as targets"""
-    
-    def __init__(self, mosei_dir: str):
-        self.mosei_dir = Path(mosei_dir)
-        self.mosei_targets = self._load_mosei_targets()
-        
-        # Initialize adapters
-        self.visual_adapter = FeatureAdapter(65, 713, hidden_dim=512).to(device)
-        self.audio_adapter = FeatureAdapter(74, 74, hidden_dim=256).to(device)
-        self.text_adapter = FeatureAdapter(768, 300, hidden_dim=384).to(device)
-    
-    def _load_mosei_targets(self) -> Dict:
-        """Load CMU-MOSEI features as target distributions"""
-        targets = {'visual': [], 'audio': [], 'text': []}
-        
-        try:
-            visual_path = self.mosei_dir / 'visuals' / 'CMU_MOSEI_VisualOpenFace2.csd'
-            audio_path = self.mosei_dir / 'acoustics' / 'CMU_MOSEI_COVAREP.csd'
-            text_path = self.mosei_dir / 'languages' / 'CMU_MOSEI_TimestampedWordVectors.csd'
-            
-            for path, key, target_size in [
-                (visual_path, 'visual', 713),
-                (audio_path, 'audio', 74),
-                (text_path, 'text', 300)
-            ]:
-                if path.exists():
-                    with h5py.File(path, 'r') as f:
-                        data_key = None
-                        for k in ['OpenFace_2', 'COVAREP', 'glove_vectors', 'data']:
-                            if k in f:
-                                data_key = k
-                                break
-                        
-                        if data_key and 'data' in f[data_key]:
-                            video_ids = list(f[data_key]['data'].keys())[:1000]  # Sample 1000
-                            for vid_id in video_ids:
-                                try:
-                                    features = f[data_key]['data'][vid_id]['features'][:]
-                                    if len(features.shape) > 1:
-                                        features = np.mean(features, axis=0)
-                                    features = features.flatten()
-                                    
-                                    # Pad/truncate to target size
-                                    if len(features) > target_size:
-                                        features = features[:target_size]
-                                    elif len(features) < target_size:
-                                        features = np.pad(features, (0, target_size - len(features)))
-                                    
-                                    targets[key].append(features.astype(np.float32))
-                                except:
-                                    continue
-            
-            print(f"MOSEI Targets: Visual={len(targets['visual'])}, "
-                  f"Audio={len(targets['audio'])}, Text={len(targets['text'])}")
-        except Exception as e:
-            print(f"Warning loading MOSEI: {e}")
-        
-        return targets
-    
-    def train_adapters(self, mosi_dataset: MOSIDataset, epochs: int = 20, batch_size: int = 16):
-        """Train adapters using MOSEI targets"""
-        dataloader = DataLoader(mosi_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        
-        optimizers = {
-            'visual': torch.optim.Adam(self.visual_adapter.parameters(), lr=0.001),
-            'audio': torch.optim.Adam(self.audio_adapter.parameters(), lr=0.001),
-            'text': torch.optim.Adam(self.text_adapter.parameters(), lr=0.001)
-        }
-        
-        criterion = nn.MSELoss()
-        
-        print("\nTraining feature adapters...")
-        for epoch in range(epochs):
-            losses = {'visual': 0, 'audio': 0, 'text': 0}
-            
-            for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
-                # Visual adapter
-                if len(self.mosei_targets['visual']) > 0:
-                    v_in = batch['visual'].to(device)
-                    target_v = torch.FloatTensor(
-                        np.random.choice(self.mosei_targets['visual'], size=v_in.shape[0])
-                    ).to(device)
-                    
-                    v_out = self.visual_adapter(v_in)
-                    v_loss = criterion(v_out, target_v)
-                    
-                    optimizers['visual'].zero_grad()
-                    v_loss.backward()
-                    optimizers['visual'].step()
-                    losses['visual'] += v_loss.item()
-                
-                # Audio adapter
-                if len(self.mosei_targets['audio']) > 0:
-                    a_in = batch['audio'].to(device)
-                    target_a = torch.FloatTensor(
-                        np.random.choice(self.mosei_targets['audio'], size=a_in.shape[0])
-                    ).to(device)
-                    
-                    a_out = self.audio_adapter(a_in)
-                    a_loss = criterion(a_out, target_a)
-                    
-                    optimizers['audio'].zero_grad()
-                    a_loss.backward()
-                    optimizers['audio'].step()
-                    losses['audio'] += a_loss.item()
-                
-                # Text adapter
-                if len(self.mosei_targets['text']) > 0:
-                    t_in = batch['text'].to(device)
-                    target_t = torch.FloatTensor(
-                        np.random.choice(self.mosei_targets['text'], size=t_in.shape[0])
-                    ).to(device)
-                    
-                    t_out = self.text_adapter(t_in)
-                    t_loss = criterion(t_out, target_t)
-                    
-                    optimizers['text'].zero_grad()
-                    t_loss.backward()
-                    optimizers['text'].step()
-                    losses['text'] += t_loss.item()
-            
-            print(f"Epoch {epoch+1}: V={losses['visual']:.4f}, A={losses['audio']:.4f}, T={losses['text']:.4f}")
-        
-        print("Adapters trained!")
-        return self.visual_adapter, self.audio_adapter, self.text_adapter
-
-
-def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
+def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32, 
+                   model_path: str = 'best_mosei_trained_model.pth'):
     """Train model on CMU-MOSEI pre-extracted features"""
+    
     print("="*80)
-    print("Training on CMU-MOSEI Pre-extracted Features")
+    print("STEP 1: Training on CMU-MOSEI Pre-extracted Features")
     print("="*80)
     
     # Load dataset
@@ -623,10 +704,9 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
         return None
     
     # Split dataset
-    total = len(dataset)
-    train_size = int(0.7 * total)
-    val_size = int(0.15 * total)
-    test_size = total - train_size - val_size
+    train_size = int(0.7 * len(dataset))
+    val_size = int(0.15 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
     
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, val_size, test_size],
@@ -635,10 +715,9 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
     
     print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
     # Initialize model
     model = RegularizedMultimodalModel(
@@ -648,38 +727,34 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
     
     criterion = ImprovedCorrelationLoss(alpha=0.3, beta=0.7)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0008, weight_decay=0.04)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.7, patience=7
-    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=7)
     
-    # Train
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Starting training for {epochs} epochs...")
+    
     best_val_corr = -1.0
-    patience_counter = 0
+    patience = 0
     max_patience = 25
     
-    print("\nStarting training...")
     for epoch in range(epochs):
         # Training
         model.train()
         train_losses = []
-        train_preds, train_labels = [], []
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
-            visual = batch['visual'].to(device)
-            audio = batch['audio'].to(device)
-            text = batch['text'].to(device)
-            labels = batch['sentiment'].to(device)
+            visual = batch['visual'].to(device).float()
+            audio = batch['audio'].to(device).float()
+            text = batch['text'].to(device).float()
+            sentiment = batch['sentiment'].to(device).float()
             
             optimizer.zero_grad()
-            outputs = model(visual, audio, text).squeeze()
-            loss = criterion(outputs, labels)
+            pred = model(visual, audio, text).squeeze()
+            loss, loss_dict = criterion(pred, sentiment)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             
             train_losses.append(loss.item())
-            train_preds.extend(outputs.detach().cpu().numpy())
-            train_labels.extend(labels.cpu().numpy())
         
         # Validation
         model.eval()
@@ -687,46 +762,42 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
         
         with torch.no_grad():
             for batch in val_loader:
-                visual = batch['visual'].to(device)
-                audio = batch['audio'].to(device)
-                text = batch['text'].to(device)
-                labels = batch['sentiment'].to(device)
+                visual = batch['visual'].to(device).float()
+                audio = batch['audio'].to(device).float()
+                text = batch['text'].to(device).float()
+                sentiment = batch['sentiment'].to(device).float()
                 
-                outputs = model(visual, audio, text).squeeze()
-                val_preds.extend(outputs.cpu().numpy())
-                val_labels.extend(labels.cpu().numpy())
+                pred = model(visual, audio, text).squeeze()
+                val_preds.extend(pred.cpu().numpy())
+                val_labels.extend(sentiment.cpu().numpy())
         
-        # Calculate metrics
-        train_corr, _ = pearsonr(train_preds, train_labels)
-        train_mae = np.mean(np.abs(np.array(train_preds) - np.array(train_labels)))
-        train_loss = np.mean(train_losses)
-        
+        val_preds = np.array(val_preds)
+        val_labels = np.array(val_labels)
         val_corr, _ = pearsonr(val_preds, val_labels)
-        val_mae = np.mean(np.abs(np.array(val_preds) - np.array(val_labels)))
+        val_mae = np.mean(np.abs(val_preds - val_labels))
+        val_loss = np.mean([(p - l)**2 for p, l in zip(val_preds, val_labels)])
         
         scheduler.step(val_corr)
-        current_lr = optimizer.param_groups[0]['lr']
         
-        # Early stopping
         if val_corr > best_val_corr:
             best_val_corr = val_corr
-            patience_counter = 0
-            torch.save(model.state_dict(), 'best_mosei_model.pth')
+            torch.save(model.state_dict(), model_path)
+            patience = 0
         else:
-            patience_counter += 1
+            patience += 1
         
-        # Print progress
         if epoch % 3 == 0:
-            print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f}, Train MAE: {train_mae:.4f}, Train Corr: {train_corr:.4f} | "
-                  f"Val Loss: {val_mae:.4f}, Val MAE: {val_mae:.4f}, Val Corr: {val_corr:.4f} | "
-                  f"Best: {best_val_corr:.4f} | LR: {current_lr:.6f} | Patience: {patience_counter}/{max_patience}")
+            train_loss = np.mean(train_losses)
+            print(f"Epoch {epoch+1:3d} | Train Loss: {train_loss:.4f} | "
+                  f"Val Loss: {val_loss:.4f}, Val MAE: {val_mae:.4f}, Val Corr: {val_corr:.4f} | "
+                  f"Best: {best_val_corr:.4f} | Patience: {patience}/{max_patience}")
         
-        if patience_counter >= max_patience:
+        if patience >= max_patience:
             print(f"Early stopping at epoch {epoch+1}")
             break
     
     # Load best model
-    model.load_state_dict(torch.load('best_mosei_model.pth'))
+    model.load_state_dict(torch.load(model_path))
     
     # Test evaluation
     model.eval()
@@ -734,21 +805,23 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
     
     with torch.no_grad():
         for batch in test_loader:
-            visual = batch['visual'].to(device)
-            audio = batch['audio'].to(device)
-            text = batch['text'].to(device)
-            labels = batch['sentiment'].to(device)
+            visual = batch['visual'].to(device).float()
+            audio = batch['audio'].to(device).float()
+            text = batch['text'].to(device).float()
+            sentiment = batch['sentiment'].to(device).float()
             
-            outputs = model(visual, audio, text).squeeze()
-            test_preds.extend(outputs.cpu().numpy())
-            test_labels.extend(labels.cpu().numpy())
+            pred = model(visual, audio, text).squeeze()
+            test_preds.extend(pred.cpu().numpy())
+            test_labels.extend(sentiment.cpu().numpy())
     
+    test_preds = np.array(test_preds)
+    test_labels = np.array(test_labels)
     test_corr, _ = pearsonr(test_preds, test_labels)
-    test_mae = np.mean(np.abs(np.array(test_preds) - np.array(test_labels)))
-    test_loss = np.mean([criterion(torch.FloatTensor([p]), torch.FloatTensor([l])) for p, l in zip(test_preds, test_labels)])
+    test_mae = np.mean(np.abs(test_preds - test_labels))
+    test_loss = np.mean([(p - l)**2 for p, l in zip(test_preds, test_labels)])
     
     print("\n" + "="*80)
-    print("MOSEI Training Results")
+    print("MOSEI Training Results:")
     print("="*80)
     print(f"Test Loss: {test_loss:.4f}")
     print(f"Test Correlation: {test_corr:.4f}")
@@ -759,74 +832,500 @@ def train_on_mosei(mosei_dir: str, epochs: int = 100, batch_size: int = 32):
     return model
 
 
-def test_on_mosi_with_adapters(
-    model: RegularizedMultimodalModel,
-    adapters: Tuple,
-    mosi_dir: str,
-    max_samples: int = None
-):
-    """Test trained model on CMU-MOSI using adapters"""
+def train_adapters(mosei_dir: str, mosi_dataset: MOSIDataset, 
+                   epochs: int = 50, batch_size: int = 16):
+    """Train adapters to map FaceMesh/BERT/Librosa to MOSEI feature space"""
+    
     print("\n" + "="*80)
-    print("Testing on CMU-MOSI with Librosa, FaceMesh, and BERT")
+    print("STEP 2: Training Feature Adapters (Improved)")
     print("="*80)
     
-    visual_adapter, audio_adapter, text_adapter = adapters
+    # Load MOSEI targets
+    mosei_dataset = MOSEIDataset(mosei_dir)
+    mosei_targets = {'visual': [], 'audio': [], 'text': []}
     
-    # Load MOSI dataset
-    mosi_dataset = MOSIDataset(mosi_dir, max_samples=max_samples)
+    # Sample more for better clustering
+    sample_size = min(2000, len(mosei_dataset.samples))
+    for sample in mosei_dataset.samples[:sample_size]:
+        mosei_targets['visual'].append(sample['visual'].astype(np.float32))
+        mosei_targets['audio'].append(sample['audio'].astype(np.float32))
+        mosei_targets['text'].append(sample['text'].astype(np.float32))
     
-    if len(mosi_dataset) == 0:
-        print("ERROR: No MOSI samples loaded!")
-        return
+    # Convert to numpy arrays
+    mosei_targets['visual'] = np.array(mosei_targets['visual'])
+    mosei_targets['audio'] = np.array(mosei_targets['audio'])
+    mosei_targets['text'] = np.array(mosei_targets['text'])
     
-    dataloader = DataLoader(mosi_dataset, batch_size=16, shuffle=False)
+    print(f"MOSEI Targets: Visual={len(mosei_targets['visual'])}, "
+          f"Audio={len(mosei_targets['audio'])}, Text={len(mosei_targets['text'])}")
+    
+    # Use K-means clustering for better target selection
+    print("\nComputing K-means clusters for target selection...")
+    n_clusters = min(100, len(mosei_targets['visual']) // 10)
+    
+    visual_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    visual_kmeans.fit(mosei_targets['visual'])
+    visual_cluster_centers = torch.FloatTensor(visual_kmeans.cluster_centers_).to(device)
+    
+    audio_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    audio_kmeans.fit(mosei_targets['audio'])
+    audio_cluster_centers = torch.FloatTensor(audio_kmeans.cluster_centers_).to(device)
+    
+    text_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    text_kmeans.fit(mosei_targets['text'])
+    text_cluster_centers = torch.FloatTensor(text_kmeans.cluster_centers_).to(device)
+    
+    print(f"Created {n_clusters} clusters for each modality")
+    
+    # Compute MOSEI feature statistics for normalization
+    print("\nComputing MOSEI feature statistics for normalization...")
+    mosei_stats = {
+        'visual': {
+            'mean': torch.FloatTensor(mosei_targets['visual'].mean(axis=0)).to(device),
+            'std': torch.FloatTensor(mosei_targets['visual'].std(axis=0) + 1e-8).to(device)
+        },
+        'audio': {
+            'mean': torch.FloatTensor(mosei_targets['audio'].mean(axis=0)).to(device),
+            'std': torch.FloatTensor(mosei_targets['audio'].std(axis=0) + 1e-8).to(device)
+        },
+        'text': {
+            'mean': torch.FloatTensor(mosei_targets['text'].mean(axis=0)).to(device),
+            'std': torch.FloatTensor(mosei_targets['text'].std(axis=0) + 1e-8).to(device)
+        }
+    }
+    print("MOSEI statistics computed")
+    
+    # Initialize adapters
+    visual_adapter = FeatureAdapter(65, 713, hidden_dim=512).to(device)
+    audio_adapter = FeatureAdapter(74, 74, hidden_dim=256).to(device)
+    text_adapter = FeatureAdapter(768, 300, hidden_dim=384).to(device)
+    
+    dataloader = DataLoader(mosi_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    
+    # Use different learning rates: higher for visual (needs more training)
+    optimizers = {
+        'visual': torch.optim.Adam(visual_adapter.parameters(), lr=0.001, weight_decay=1e-5),
+        'audio': torch.optim.Adam(audio_adapter.parameters(), lr=0.0005, weight_decay=1e-5),
+        'text': torch.optim.Adam(text_adapter.parameters(), lr=0.0005, weight_decay=1e-5)
+    }
+    
+    # Add learning rate schedulers
+    schedulers = {
+        'visual': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizers['visual'], mode='min', factor=0.7, patience=5),
+        'audio': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizers['audio'], mode='min', factor=0.7, patience=5),
+        'text': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizers['text'], mode='min', factor=0.7, patience=5)
+    }
+    
+    criterion = nn.MSELoss()
+    
+    print("\nTraining adapters...")
+    best_losses = {'visual': float('inf'), 'audio': float('inf'), 'text': float('inf')}
+    
+    for epoch in range(epochs):
+        losses = {'visual': 0, 'audio': 0, 'text': 0}
+        batch_counts = {'visual': 0, 'audio': 0, 'text': 0}
+        
+        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
+            # Visual adapter - use K-means nearest cluster
+            if len(mosei_targets['visual']) > 0:
+                v_in = batch['visual'].to(device).float()
+                
+                # For visual: cluster first 65 dims of MOSEI features to match FaceMesh input dim
+                # Then use full 713-dim cluster centers as targets
+                if visual_cluster_centers.shape[1] >= 65:
+                    # Use first 65 dims for distance computation
+                    v_in_for_dist = v_in  # [batch, 65]
+                    centers_for_dist = visual_cluster_centers[:, :65]  # [n_clusters, 65]
+                else:
+                    v_in_for_dist = v_in[:, :visual_cluster_centers.shape[1]]
+                    centers_for_dist = visual_cluster_centers
+                
+                distances = torch.cdist(v_in_for_dist.unsqueeze(1), centers_for_dist.unsqueeze(0)).squeeze(1)
+                nearest_clusters = torch.argmin(distances, dim=1)
+                target_v = visual_cluster_centers[nearest_clusters]  # [batch, 713]
+                
+                v_out = visual_adapter(v_in)
+                v_loss = criterion(v_out, target_v)
+                
+                optimizers['visual'].zero_grad()
+                v_loss.backward()
+                torch.nn.utils.clip_grad_norm_(visual_adapter.parameters(), 1.0)
+                optimizers['visual'].step()
+                losses['visual'] += v_loss.item()
+                batch_counts['visual'] += 1
+            
+            # Audio adapter - use K-means nearest cluster
+            if len(mosei_targets['audio']) > 0:
+                a_in = batch['audio'].to(device).float()
+                
+                # Find nearest cluster center
+                distances = torch.cdist(a_in.unsqueeze(1), audio_cluster_centers.unsqueeze(0)).squeeze(1)
+                nearest_clusters = torch.argmin(distances, dim=1)
+                target_a = audio_cluster_centers[nearest_clusters]
+                
+                a_out = audio_adapter(a_in)
+                a_loss = criterion(a_out, target_a)
+                
+                optimizers['audio'].zero_grad()
+                a_loss.backward()
+                torch.nn.utils.clip_grad_norm_(audio_adapter.parameters(), 1.0)
+                optimizers['audio'].step()
+                losses['audio'] += a_loss.item()
+                batch_counts['audio'] += 1
+            
+            # Text adapter - use K-means nearest cluster
+            if len(mosei_targets['text']) > 0:
+                t_in = batch['text'].to(device).float()
+                
+                # Find nearest cluster center (use first 768 dims if text clusters have more)
+                if text_cluster_centers.shape[1] >= 768:
+                    t_in_for_dist = t_in
+                    centers_for_dist = text_cluster_centers[:, :768]
+                else:
+                    t_in_for_dist = t_in[:, :text_cluster_centers.shape[1]]
+                    centers_for_dist = text_cluster_centers
+                
+                distances = torch.cdist(t_in_for_dist.unsqueeze(1), centers_for_dist.unsqueeze(0)).squeeze(1)
+                nearest_clusters = torch.argmin(distances, dim=1)
+                target_t = text_cluster_centers[nearest_clusters]
+                
+                t_out = text_adapter(t_in)
+                t_loss = criterion(t_out, target_t)
+                
+                optimizers['text'].zero_grad()
+                t_loss.backward()
+                torch.nn.utils.clip_grad_norm_(text_adapter.parameters(), 1.0)
+                optimizers['text'].step()
+                losses['text'] += t_loss.item()
+                batch_counts['text'] += 1
+        
+        # Average losses
+        if batch_counts['visual'] > 0:
+            losses['visual'] /= batch_counts['visual']
+        if batch_counts['audio'] > 0:
+            losses['audio'] /= batch_counts['audio']
+        if batch_counts['text'] > 0:
+            losses['text'] /= batch_counts['text']
+        
+        # Update schedulers
+        schedulers['visual'].step(losses['visual'])
+        schedulers['audio'].step(losses['audio'])
+        schedulers['text'].step(losses['text'])
+        
+        # Track best losses
+        if losses['visual'] < best_losses['visual']:
+            best_losses['visual'] = losses['visual']
+        if losses['audio'] < best_losses['audio']:
+            best_losses['audio'] = losses['audio']
+        if losses['text'] < best_losses['text']:
+            best_losses['text'] = losses['text']
+        
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"Epoch {epoch+1}/{epochs}:")
+            print(f"  Visual: {losses['visual']:.4f} (best: {best_losses['visual']:.4f}, lr: {optimizers['visual'].param_groups[0]['lr']:.6f})")
+            print(f"  Audio: {losses['audio']:.4f} (best: {best_losses['audio']:.4f}, lr: {optimizers['audio'].param_groups[0]['lr']:.6f})")
+            print(f"  Text: {losses['text']:.4f} (best: {best_losses['text']:.4f}, lr: {optimizers['text'].param_groups[0]['lr']:.6f})")
+    
+    print("\nAdapters trained!")
+    print(f"Final losses - Visual: {losses['visual']:.4f}, Audio: {losses['audio']:.4f}, Text: {losses['text']:.4f}")
+    return visual_adapter, audio_adapter, text_adapter, mosei_stats
+
+
+def fine_tune_end_to_end(model: RegularizedMultimodalModel, adapters: Tuple,
+                        mosi_dataset: MOSIDataset, epochs: int = 20, batch_size: int = 16):
+    """Fine-tune adapters + model together on MOSI with sentiment loss"""
+    
+    print("\n" + "="*80)
+    print("STEP 3.5: End-to-End Fine-tuning on CMU-MOSI")
+    print("="*80)
+    
+    if len(adapters) == 5:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats, _ = adapters
+        normalize_features = True
+    elif len(adapters) == 4:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats = adapters
+        normalize_features = True
+    else:
+        visual_adapter, audio_adapter, text_adapter = adapters
+        mosei_stats = None
+        normalize_features = False
+    
+    # Set all to train mode
+    model.train()
+    visual_adapter.train()
+    audio_adapter.train()
+    text_adapter.train()
+    
+    # Create combined optimizer
+    all_params = list(model.parameters()) + list(visual_adapter.parameters()) + \
+                 list(audio_adapter.parameters()) + list(text_adapter.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=0.0001, weight_decay=1e-5)
+    
+    # Use sentiment loss
+    criterion = ImprovedCorrelationLoss(alpha=0.3, beta=0.7)
+    
+    # Split MOSI for fine-tuning (60% train, 20% val, 20% test - held out)
+    total_size = len(mosi_dataset)
+    train_size = int(0.6 * total_size)
+    val_size = int(0.2 * total_size)
+    test_size = total_size - train_size - val_size
+    
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        mosi_dataset, [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    # Store test dataset for later use
+    mosi_dataset._test_dataset = test_dataset
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    print(f"Fine-tuning for {epochs} epochs...")
+    print(f"Train: {train_size} samples, Val: {val_size} samples, Test (held out): {test_size} samples")
+    best_val_corr = -1.0
+    
+    for epoch in range(epochs):
+        model.train()
+        visual_adapter.train()
+        audio_adapter.train()
+        text_adapter.train()
+        
+        epoch_losses = []
+        
+        for batch in tqdm(train_loader, desc=f"Fine-tuning Epoch {epoch+1}/{epochs}"):
+            # Adapt features
+            v_adapted = visual_adapter(batch['visual'].to(device).float())
+            a_adapted = audio_adapter(batch['audio'].to(device).float())
+            t_adapted = text_adapter(batch['text'].to(device).float())
+            
+            # Normalize if stats available
+            if normalize_features and mosei_stats is not None:
+                v_adapted = (v_adapted - mosei_stats['visual']['mean']) / mosei_stats['visual']['std']
+                a_adapted = (a_adapted - mosei_stats['audio']['mean']) / mosei_stats['audio']['std']
+                t_adapted = (t_adapted - mosei_stats['text']['mean']) / mosei_stats['text']['std']
+                v_adapted = torch.clamp(v_adapted, -10, 10)
+                a_adapted = torch.clamp(a_adapted, -10, 10)
+                t_adapted = torch.clamp(t_adapted, -10, 10)
+            
+            # Predict
+            pred = model(v_adapted, a_adapted, t_adapted).squeeze()
+            sentiment = batch['sentiment'].to(device).float()
+            
+            # Loss
+            loss, loss_dict = criterion(pred, sentiment)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+            optimizer.step()
+            
+            epoch_losses.append(loss.item())
+        
+        # Validation
+        model.eval()
+        visual_adapter.eval()
+        audio_adapter.eval()
+        text_adapter.eval()
+        
+        val_preds, val_labels = [], []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                v_adapted = visual_adapter(batch['visual'].to(device).float())
+                a_adapted = audio_adapter(batch['audio'].to(device).float())
+                t_adapted = text_adapter(batch['text'].to(device).float())
+                
+                if normalize_features and mosei_stats is not None:
+                    v_adapted = (v_adapted - mosei_stats['visual']['mean']) / mosei_stats['visual']['std']
+                    a_adapted = (a_adapted - mosei_stats['audio']['mean']) / mosei_stats['audio']['std']
+                    t_adapted = (t_adapted - mosei_stats['text']['mean']) / mosei_stats['text']['std']
+                    v_adapted = torch.clamp(v_adapted, -10, 10)
+                    a_adapted = torch.clamp(a_adapted, -10, 10)
+                    t_adapted = torch.clamp(t_adapted, -10, 10)
+                
+                pred = model(v_adapted, a_adapted, t_adapted).squeeze()
+                val_preds.extend(pred.cpu().numpy())
+                val_labels.extend(batch['sentiment'].numpy())
+        
+        val_preds = np.array(val_preds)
+        val_labels = np.array(val_labels)
+        
+        if len(val_preds) >= 2:
+            val_corr, _ = pearsonr(val_preds, val_labels)
+            val_mae = np.mean(np.abs(val_preds - val_labels))
+            
+            if val_corr > best_val_corr:
+                best_val_corr = val_corr
+            
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                avg_loss = np.mean(epoch_losses)
+                print(f"Epoch {epoch+1}: Loss={avg_loss:.4f}, Val Corr={val_corr:.4f}, Val MAE={val_mae:.4f}")
+    
+    print(f"\nFine-tuning complete! Best validation correlation: {best_val_corr:.4f}")
+    # Return test dataset for proper evaluation
+    return visual_adapter, audio_adapter, text_adapter, mosei_stats, test_dataset
+
+
+def test_on_mosi(model: RegularizedMultimodalModel, adapters: Tuple, 
+                 mosi_dataset: MOSIDataset, model_path: str, test_dataset=None):
+    """Test adapted features on CMU-MOSI"""
+    
+    print("\n" + "="*80)
+    print("STEP 3: Testing on CMU-MOSI with Adapted Features")
+    print("="*80)
+    
+    if len(adapters) == 5:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats, _ = adapters
+        normalize_features = True
+        print("Using feature normalization to match MOSEI statistics")
+    elif len(adapters) == 4:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats = adapters
+        normalize_features = True
+        print("Using feature normalization to match MOSEI statistics")
+    else:
+        visual_adapter, audio_adapter, text_adapter = adapters
+        mosei_stats = None
+        normalize_features = False
+    
+    # Load trained model
+    if Path(model_path).exists():
+        model.load_state_dict(torch.load(model_path))
+        print(f"Loaded trained model from {model_path}")
     
     model.eval()
     visual_adapter.eval()
     audio_adapter.eval()
     text_adapter.eval()
     
-    predictions, labels = [], []
+    # Use test dataset if provided (held out), otherwise use full dataset
+    if test_dataset is not None:
+        print(f"\nUsing held-out test set: {len(test_dataset)} samples")
+        dataloader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+    else:
+        print(f"\nUsing full dataset: {len(mosi_dataset)} samples (WARNING: may include fine-tuning data)")
+        dataloader = DataLoader(mosi_dataset, batch_size=16, shuffle=False)
     
-    print("\nExtracting features and testing...")
+    predictions, labels = [], []
+    sample_ids = []
+    
+    test_size = len(test_dataset) if test_dataset is not None else len(mosi_dataset)
+    print(f"\nTesting on {test_size} CMU-MOSI samples...")
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Processing MOSI samples"):
-            # Extract features with Librosa/FaceMesh/BERT
-            visual_raw = batch['visual'].to(device)  # FaceMesh: [batch, 65]
-            audio_raw = batch['audio'].to(device)    # Librosa: [batch, 74]
-            text_raw = batch['text'].to(device)      # BERT: [batch, 768]
+        for batch in tqdm(dataloader, desc="Testing on CMU-MOSI"):
+            # Adapt features
+            v_adapted = visual_adapter(batch['visual'].to(device).float())
+            a_adapted = audio_adapter(batch['audio'].to(device).float())
+            t_adapted = text_adapter(batch['text'].to(device).float())
             
-            # Adapt features to MOSEI space
-            visual_adapted = visual_adapter(visual_raw)  # [batch, 713]
-            audio_adapted = audio_adapter(audio_raw)     # [batch, 74]
-            text_adapted = text_adapter(text_raw)        # [batch, 300]
+            # Normalize adapted features to match MOSEI feature distribution
+            if normalize_features and mosei_stats is not None:
+                v_adapted = (v_adapted - mosei_stats['visual']['mean']) / mosei_stats['visual']['std']
+                a_adapted = (a_adapted - mosei_stats['audio']['mean']) / mosei_stats['audio']['std']
+                t_adapted = (t_adapted - mosei_stats['text']['mean']) / mosei_stats['text']['std']
+                
+                # Clip extreme values to prevent outliers
+                v_adapted = torch.clamp(v_adapted, -10, 10)
+                a_adapted = torch.clamp(a_adapted, -10, 10)
+                t_adapted = torch.clamp(t_adapted, -10, 10)
             
-            # Predict with trained model
-            pred = model(visual_adapted, audio_adapted, text_adapted)
+            # Predict
+            pred = model(v_adapted, a_adapted, t_adapted)
+            
+            # Diagnostic: Check first batch predictions
+            if len(predictions) == 0:
+                print(f"\nSample adapted feature ranges:")
+                print(f"  Visual adapted: [{v_adapted.min():.4f}, {v_adapted.max():.4f}], mean={v_adapted.mean():.4f}")
+                print(f"  Audio adapted: [{a_adapted.min():.4f}, {a_adapted.max():.4f}], mean={a_adapted.mean():.4f}")
+                print(f"  Text adapted: [{t_adapted.min():.4f}, {t_adapted.max():.4f}], mean={t_adapted.mean():.4f}")
+                print(f"\nFirst 5 predictions vs labels:")
+                for i in range(min(5, len(pred))):
+                    print(f"  Pred={pred[i].item():.4f}, Label={batch['sentiment'][i].item():.4f}")
             
             predictions.extend(pred.cpu().numpy().flatten())
             labels.extend(batch['sentiment'].numpy())
+            if 'id' in batch:
+                sample_ids.extend(batch['id'])
     
-    # Calculate metrics
+    print(f"\nLoaded {len(predictions)} predictions and {len(labels)} labels")
+    print(f"Label statistics:")
+    print(f"  Non-zero labels: {np.sum(np.array(labels) != 0.0)}")
+    print(f"  Zero labels: {np.sum(np.array(labels) == 0.0)}")
+    if len(labels) > 0:
+        print(f"  Label range: [{np.min(labels):.2f}, {np.max(labels):.2f}]")
+        print(f"  Label mean: {np.mean(labels):.2f}")
+    
+    # Diagnostic: Check prediction variance
+    if len(predictions) > 0:
+        pred_array = np.array(predictions)
+        print(f"\nPrediction statistics:")
+        print(f"  Prediction range: [{np.min(pred_array):.4f}, {np.max(pred_array):.4f}]")
+        print(f"  Prediction mean: {np.mean(pred_array):.4f}")
+        print(f"  Prediction std: {np.std(pred_array):.4f}")
+        print(f"  Label std: {np.std(labels):.4f}")
+    
+    # Metrics
     predictions = np.array(predictions)
     labels = np.array(labels)
     
-    correlation, _ = pearsonr(predictions, labels)
-    mae = np.mean(np.abs(predictions - labels))
+    # Remove zero labels (missing labels)
+    mask = labels != 0.0
+    if np.sum(mask) > 0:
+        predictions = predictions[mask]
+        labels = labels[mask]
+    else:
+        print("WARNING: No valid labels found (all labels are zero)")
+        print("Returning default metrics...")
+        return {
+            'mse': float('nan'),
+            'correlation': float('nan'),
+            'mae': float('nan'),
+            'num_samples': 0
+        }
     
-    print("\n" + "="*80)
-    print("CMU-MOSI Test Results (with Feature Adapters)")
-    print("="*80)
-    print(f"Correlation: {correlation:.4f}")
-    print(f"MAE: {mae:.4f}")
-    print(f"Number of samples: {len(predictions)}")
-    print("="*80)
+    # Check if we have enough samples for correlation
+    if len(predictions) < 2:
+        print(f"WARNING: Only {len(predictions)} valid sample(s) - cannot compute correlation")
+        print("Computing MAE and MSE only...")
+        if len(predictions) == 1:
+            mae = np.abs(predictions[0] - labels[0])
+            mse = (predictions[0] - labels[0]) ** 2
+            correlation = float('nan')
+        else:
+            mae = float('nan')
+            mse = float('nan')
+            correlation = float('nan')
+    else:
+        correlation, _ = pearsonr(predictions, labels)
+        mae = np.mean(np.abs(predictions - labels))
+        mse = np.mean((predictions - labels) ** 2)
+    
+    print(f"\n{'='*80}")
+    print(f"CMU-MOSI Test Results (with adapted features):")
+    print(f"{'='*80}")
+    if not np.isnan(mse):
+        print(f"Test Loss (MSE): {mse:.4f}")
+    else:
+        print(f"Test Loss (MSE): N/A (insufficient samples)")
+    
+    if not np.isnan(correlation):
+        print(f"Test Correlation: {correlation:.4f}")
+    else:
+        print(f"Test Correlation: N/A (requires at least 2 samples)")
+    
+    if not np.isnan(mae):
+        print(f"Test MAE: {mae:.4f}")
+    else:
+        print(f"Test MAE: N/A (insufficient samples)")
+    
+    print(f"Number of valid samples: {len(predictions)}")
+    print(f"{'='*80}")
     
     return {
+        'mse': float(mse),
         'correlation': float(correlation),
         'mae': float(mae),
-        'predictions': predictions.tolist(),
-        'labels': labels.tolist()
+        'num_samples': len(predictions)
     }
 
 
@@ -840,74 +1339,110 @@ def main():
     parser.add_argument('--mosi_dir', type=str,
                        default="C:/Users/PC/Downloads/CMU-MOSI Dataset",
                        help='Path to CMU-MOSI directory')
+    parser.add_argument('--mosei_samples', type=int, default=None,
+                       help='Maximum MOSEI samples for training')
+    parser.add_argument('--mosi_samples', type=int, default=50,
+                       help='Maximum MOSI samples for testing (start small)')
     parser.add_argument('--train_epochs', type=int, default=100,
-                       help='Number of training epochs on MOSEI')
-    parser.add_argument('--adapter_epochs', type=int, default=20,
-                       help='Number of epochs for adapter training')
-    parser.add_argument('--mosi_max_samples', type=int, default=None,
-                       help='Maximum MOSI samples to process (None for all)')
+                       help='Epochs for training on MOSEI')
+    parser.add_argument('--adapter_epochs', type=int, default=50,
+                       help='Epochs for training adapters')
+    parser.add_argument('--fine_tune_epochs', type=int, default=20,
+                       help='Epochs for end-to-end fine-tuning')
+    parser.add_argument('--skip_fine_tuning', action='store_true',
+                       help='Skip end-to-end fine-tuning')
     parser.add_argument('--skip_training', action='store_true',
                        help='Skip MOSEI training (use existing model)')
-    parser.add_argument('--skip_adapters', action='store_true',
-                       help='Skip adapter training (use existing adapters)')
+    parser.add_argument('--model_path', type=str, default='best_mosei_trained_model.pth',
+                       help='Path to save/load trained model')
     
     args = parser.parse_args()
     
     print("="*80)
-    print("MOSEI Training → MOSI Testing with Feature Adapters")
+    print("Train on CMU-MOSEI, Test on CMU-MOSI with Feature Adapters")
     print("="*80)
     print(f"MOSEI Dir: {args.mosei_dir}")
     print(f"MOSI Dir: {args.mosi_dir}")
+    print(f"MOSEI Samples: {args.mosei_samples or 'All'}")
+    print(f"MOSI Samples: {args.mosi_samples}")
     print("="*80)
     
-    # Step 1: Train model on MOSEI
-    model = None
+    # Check paths
+    if not Path(args.mosei_dir).exists():
+        print(f"ERROR: MOSEI directory not found: {args.mosei_dir}")
+        return
+    
+    if not Path(args.mosi_dir).exists():
+        print(f"ERROR: MOSI directory not found: {args.mosi_dir}")
+        return
+    
+    # Step 1: Train on MOSEI
     if not args.skip_training:
-        model = train_on_mosei(args.mosei_dir, epochs=args.train_epochs)
+        model = train_on_mosei(
+            args.mosei_dir, 
+            epochs=args.train_epochs,
+            model_path=args.model_path
+        )
     else:
-        # Load existing model
+        print("\nSkipping MOSEI training (using existing model)...")
         model = RegularizedMultimodalModel(
             visual_dim=713, audio_dim=74, text_dim=300,
             hidden_dim=192, embed_dim=96, dropout=0.7
         ).to(device)
-        model.load_state_dict(torch.load('best_mosei_model.pth'))
-        print("Loaded existing model from best_mosei_model.pth")
     
-    # Step 2: Train adapters
-    adapters = None
-    if not args.skip_adapters:
-        adapter_trainer = AdapterTrainer(args.mosei_dir)
-        mosi_dataset_for_adapter = MOSIDataset(args.mosi_dir, max_samples=50)  # Use subset for adapter training
-        adapters = adapter_trainer.train_adapters(mosi_dataset_for_adapter, epochs=args.adapter_epochs)
-        
-        # Save adapters
-        torch.save(adapter_trainer.visual_adapter.state_dict(), 'visual_adapter.pth')
-        torch.save(adapter_trainer.audio_adapter.state_dict(), 'audio_adapter.pth')
-        torch.save(adapter_trainer.text_adapter.state_dict(), 'text_adapter.pth')
-        print("Adapters saved!")
-    else:
-        # Load existing adapters
-        visual_adapter = FeatureAdapter(65, 713, hidden_dim=512).to(device)
-        audio_adapter = FeatureAdapter(74, 74, hidden_dim=256).to(device)
-        text_adapter = FeatureAdapter(768, 300, hidden_dim=384).to(device)
-        
-        visual_adapter.load_state_dict(torch.load('visual_adapter.pth'))
-        audio_adapter.load_state_dict(torch.load('audio_adapter.pth'))
-        text_adapter.load_state_dict(torch.load('text_adapter.pth'))
-        
-        adapters = (visual_adapter, audio_adapter, text_adapter)
-        print("Loaded existing adapters")
+    if model is None:
+        print("ERROR: Model training failed!")
+        return
     
-    # Step 3: Test on MOSI
-    results = test_on_mosi_with_adapters(
-        model, adapters, args.mosi_dir, max_samples=args.mosi_max_samples
+    # Step 2: Load MOSI dataset
+    print(f"\nLoading CMU-MOSI dataset (max {args.mosi_samples} samples)...")
+    mosi_dataset = MOSIDataset(args.mosi_dir, max_samples=args.mosi_samples)
+    
+    if len(mosi_dataset) == 0:
+        print("ERROR: No CMU-MOSI samples loaded. Check dataset structure and paths.")
+        return
+    
+    # Step 3: Train adapters
+    adapters_and_stats = train_adapters(
+        args.mosei_dir,
+        mosi_dataset,
+        epochs=args.adapter_epochs
     )
     
+    # Step 3.5: End-to-end fine-tuning (optional but recommended)
+    if not args.skip_fine_tuning:
+        print("\n" + "="*80)
+        print("OPTIONAL: End-to-End Fine-tuning")
+        print("="*80)
+        print("This fine-tunes adapters + model together for sentiment prediction.")
+        print("This should significantly improve correlation!")
+        print("="*80)
+        
+        adapters_and_stats = fine_tune_end_to_end(
+            model, adapters_and_stats, mosi_dataset,
+            epochs=args.fine_tune_epochs
+        )
+    
+    # Save adapters
+    print("\nSaving trained adapters...")
+    if len(adapters_and_stats) == 5:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats, test_dataset = adapters_and_stats
+    else:
+        visual_adapter, audio_adapter, text_adapter, mosei_stats = adapters_and_stats
+        test_dataset = None
+    torch.save(visual_adapter.state_dict(), 'visual_adapter.pth')
+    torch.save(audio_adapter.state_dict(), 'audio_adapter.pth')
+    torch.save(text_adapter.state_dict(), 'text_adapter.pth')
+    print("Adapters saved!")
+    
+    # Step 4: Test on MOSI (using held-out test set if available)
+    results = test_on_mosi(model, adapters_and_stats, mosi_dataset, args.model_path, test_dataset=test_dataset)
+    
     # Save results
-    with open('mosei_train_mosi_test_results.json', 'w') as f:
+    with open('mosei_to_mosi_results.json', 'w') as f:
         json.dump(results, f, indent=2)
     
-    print("\nResults saved to mosei_train_mosi_test_results.json")
+    print("\nResults saved to mosei_to_mosi_results.json")
     print("="*80)
 
 

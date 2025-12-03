@@ -1,0 +1,58 @@
+================================================================================
+FUTURE WORKS SECTION:
+================================================================================
+
+Found 'future work' at position 43080
+
+on and MAE results might be a
+bit lower, but that’s due to the complexity of transfer learning and what needs to be done to ensure
+that the extracted features get matched up with my architecture.
+4.5 Future Works
+In the future, I plan to not stick with just these three modalities, I want to expand it on more modalities
+such as body gestures. I plan to use a system like blazepose, where I can use it to extract certain body
+features to understand how body gestures can contribute to overall sentiment analysis. To match up
+with blazepose, I plan on using the AMIGOS dataset, where it provides videos, audios, and text to
+understand how body gestures can impact overall analysis. In addition, to support my overall sentiment
+analysis, I want to add in more data to ensure that the complex model is fully supported with no
+overfitting. With the addition of datasets such as IEMOCAP and AMIGOS, it could help provide the
+variety that the model needs to have a good correlation and accuracy, and lower MAE.
+
+
+================================================================================
+
+================================================================================
+LIMITATIONS SECTION:
+================================================================================
+
+Found 'limitation' at position 4353
+
+er than temporal sequences. The system aims to enhance
+emotional understanding in HCI and provide a tool for healthcare professionals to monitor patient
+emotional states.
+This framework addresses the limitations of dataset-specific approaches by enabling cross-dataset
+transfer learning through feature adaptation, allowing a model trained on one feature extraction
+pipeline to work with a different pipeline through learned feature mappings. The contributions of this
+work include: (1) a cross-modal fusion architecture with MultiheadAttention that models bidirectional
+interactions between visual, audio, and text modalities, (2) a feature adaptation strategy that enables
+transfer learning between different feature extraction paradigms through learned feature space mappings
+(FaceMesh→OpenFace2, BERT→GloVe, Librosa→COVAREP), and (3) a correlation-optimized loss
+function that jointly minimizes regression error (MSE+MAE) and maximizes Pearson correlation. The
+resulting system demonstrates improved sentiment prediction accuracy and has potential applications
+in HCI and computational mental health assessment.
+2 Literature Review
+This section reviews existing approaches to computational emotion recognition and mental health
+assessment, organized by methodological paradigm. We examine traditional machine learning methods,
+deep learning architectures, and hybrid approaches that combine multiple techniques. Special attention
+is given to multimodal fusion strategies and temporal modeling, as these directly inform our proposed
+framework.
+2.0.1 Traditional Machine Learning Approaches
+Early computational approaches to mental health assessment employed traditional machine learning
+algorithms to analyze behavioral and physiological signals. Research has investigated whether Hid-
+den Markov Models (HMMs) [ 6] can uncover interpersonal interaction dynamics between patients
+and therapists during psychotherapy sessions. One study examined 39 adolescent and young adult
+participants with depressive symptoms, with therapy sessions conducted by two therapists. The
+researchers modeled three behavioral states: patient-speaking, patient hyper-focused listening, and
+patient unfocused listening.
+
+================================================================================
+

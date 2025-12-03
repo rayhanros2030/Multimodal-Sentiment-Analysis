@@ -176,3 +176,6 @@ text_embeddings = outputs.last_hidden_state.mean(dim=1)  # [1, 768]
   - Model retraining
 - **Recommendation:** Stick with OpenFace2 for now (already optimized for emotion)
 
+
+
+

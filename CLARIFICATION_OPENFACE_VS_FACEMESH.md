@@ -79,3 +79,6 @@ But currently, you're using the **ready-made OpenFace2 features** from CMU-MOSEI
 
 The whole time you've been working with **OpenFace2**, not Facemesh!
 
+
+
+

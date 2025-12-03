@@ -1,0 +1,261 @@
+<mxfile>
+  <diagram name="Organized Architecture" id="diagram-organized">
+    <mxGraphModel dx="1800" dy="2600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="2600">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- TITLE -->
+        <mxCell id="title" value="Multimodal Sentiment Analysis Architecture&#xa;(Actual Implementation)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="450" y="20" width="900" height="60" as="geometry"/>
+        </mxCell>
+        
+        <!-- NOTE -->
+        <mxCell id="note" value="NOTE: Features are aggregated (averaged) before model input. No temporal sequences - single feature vectors only." style="text;html=1;strokeColor=#B85450;fillColor=#F8CECC;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=12;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="100" y="100" width="1600" height="35" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- LAYER 1: INPUT MODALITIES -->
+        <!-- ================================================================================ -->
+        <mxCell id="layer1-header" value="LAYER 1: INPUT MODALITIES" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="160" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="video-in" value="Video&#xa;(RGB Frames)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=14;fontStyle=0" vertex="1" parent="1">
+          <mxGeometry x="250" y="220" width="280" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="audio-in" value="Audio&#xa;(Waveform)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=14;fontStyle=0" vertex="1" parent="1">
+          <mxGeometry x="760" y="220" width="280" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="text-in" value="Text&#xa;(Transcript)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=14;fontStyle=0" vertex="1" parent="1">
+          <mxGeometry x="1270" y="220" width="280" height="70" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- LAYER 2: FEATURE EXTRACTION -->
+        <!-- ================================================================================ -->
+        <mxCell id="layer2-header" value="LAYER 2: FEATURE EXTRACTION &amp; AGGREGATION" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="320" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <!-- MOSEI TRAINING PATH -->
+        <mxCell id="mosei-label" value="CMU-MOSEI (Training): Pre-extracted Features" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="380" width="1600" height="35" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="v-mosei" value="OpenFace2&#xa;Visual Features&#xa;[713 dimensions]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="435" width="280" height="85" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="a-mosei" value="COVAREP&#xa;Audio Features&#xa;[74 dimensions]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="435" width="280" height="85" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="t-mosei" value="GloVe&#xa;Text Features&#xa;[300 dimensions]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="435" width="280" height="85" as="geometry"/>
+        </mxCell>
+        
+        <!-- MOSI TESTING PATH -->
+        <mxCell id="mosi-label" value="CMU-MOSI (Testing): Real-time Feature Extraction + Feature Adapters" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="550" width="1600" height="35" as="geometry"/>
+        </mxCell>
+        
+        <!-- Visual Path -->
+        <mxCell id="v-mosi-extract" value="FaceMesh&#xa;468 Landmarks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="150" y="605" width="180" height="65" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="v-mosi-feat" value="→&#xa;Emotion Features&#xa;[65 dimensions]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="350" y="605" width="180" height="65" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="v-adapter" value="→&#xa;Feature Adapter&#xa;[65 → 713]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="550" y="605" width="180" height="65" as="geometry"/>
+        </mxCell>
+        
+        <!-- Audio Path -->
+        <mxCell id="a-mosi-extract" value="Librosa&#xa;MFCC + Chroma + Spectral" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="860" y="605" width="280" height="65" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="a-mosi-feat" value="→&#xa;Audio Features&#xa;[74 dimensions]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1160" y="605" width="180" height="65" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="a-adapter-note" value="(No adapter needed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5FF;strokeColor=#0066CC;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="1360" y="605" width="140" height="65" as="geometry"/>
+        </mxCell>
+        
+        <!-- Text Path -->
+        <mxCell id="t-mosi-extract" value="BERT Tokenizer&#xa;+ BERT Model" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="605" width="180" height="65" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- LAYER 3: MODALITY ENCODERS -->
+        <!-- ================================================================================ -->
+        <mxCell id="layer3-header" value="LAYER 3: MODALITY-SPECIFIC ENCODERS" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="700" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="layer3-desc" value="Linear Layers: Input → hidden_dim(192) → embed_dim(96) | BatchNorm + ReLU + Dropout(0.7)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="100" y="750" width="1600" height="25" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="v-encoder" value="Visual Encoder&#xa;─────────────────────&#xa;Input: [713-dim]&#xa;Linear: 713 → 192&#xa;BatchNorm + ReLU&#xa;Dropout(0.7)&#xa;Linear: 192 → 96&#xa;BatchNorm&#xa;─────────────────────&#xa;Output: [96-dim]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="795" width="280" height="180" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="a-encoder" value="Audio Encoder&#xa;─────────────────────&#xa;Input: [74-dim]&#xa;Linear: 74 → 192&#xa;BatchNorm + ReLU&#xa;Dropout(0.7)&#xa;Linear: 192 → 96&#xa;BatchNorm&#xa;─────────────────────&#xa;Output: [96-dim]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="760" y="795" width="280" height="180" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="t-encoder" value="Text Encoder&#xa;─────────────────────&#xa;Input: [300-dim]&#xa;Linear: 300 → 192&#xa;BatchNorm + ReLU&#xa;Dropout(0.7)&#xa;Linear: 192 → 96&#xa;BatchNorm&#xa;─────────────────────&#xa;Output: [96-dim]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="795" width="280" height="180" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="unified-dim-note" value="✓ All modalities encoded to unified dimension: 96" style="text;html=1;strokeColor=#82B366;fillColor=#D5E8D4;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="1000" width="1600" height="30" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- LAYER 4: CROSS-MODAL FUSION -->
+        <!-- ================================================================================ -->
+        <mxCell id="layer4-header" value="LAYER 4: CROSS-MODAL FUSION" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="1060" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <!-- Step 1: Attention -->
+        <mxCell id="attn-box" value="STEP 1: MultiheadAttention&#xa;───────────────────────────&#xa;Input: Stack [96, 96, 96]&#xa;Heads: 4&#xa;Dropout: 0.8&#xa;───────────────────────────&#xa;Learn cross-modal relationships" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="1120" width="300" height="130" as="geometry"/>
+        </mxCell>
+        
+        <!-- Step 2: Concatenation -->
+        <mxCell id="concat-box" value="STEP 2: Concatenation&#xa;───────────────────────────&#xa;Input: [96, 96, 96]&#xa;Operation: Concatenate&#xa;───────────────────────────&#xa;Output: [288]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="1120" width="300" height="130" as="geometry"/>
+        </mxCell>
+        
+        <!-- Step 3: Fusion MLP -->
+        <mxCell id="fusion-box" value="STEP 3: Fusion MLP&#xa;───────────────────────────&#xa;Input: [288]&#xa;Linear: 288 → 192&#xa;BatchNorm + ReLU + Dropout(0.7)&#xa;Linear: 192 → 96&#xa;BatchNorm + ReLU + Dropout(0.7)&#xa;Linear: 96 → 1&#xa;───────────────────────────&#xa;Output: [1]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="1120" width="300" height="180" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- OUTPUT -->
+        <!-- ================================================================================ -->
+        <mxCell id="output-header" value="OUTPUT LAYER" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="1340" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="output-box" value="Sentiment Score&#xa;───────────────────────────&#xa;Type: Regression&#xa;Output: Single scalar&#xa;Range: [-3, +3]&#xa;───────────────────────────&#xa;Continuous sentiment intensity&#xa;from strongly negative to&#xa;strongly positive" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=13;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="650" y="1400" width="500" height="140" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- LOSS FUNCTION -->
+        <!-- ================================================================================ -->
+        <mxCell id="loss-header" value="LOSS FUNCTION" style="text;html=1;strokeColor=#0066CC;fillColor=#E1F5FF;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=1;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="1580" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="loss-box" value="Improved Correlation Loss&#xa;───────────────────────────────────────────────────────────────&#xa;L = α × (MSE + MAE)/2 + β × (1 - Pearson Correlation)²&#xa;───────────────────────────────────────────────────────────────&#xa;α = 0.3 (accuracy weight)  |  β = 0.7 (correlation weight)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=13;align=left;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1640" width="1600" height="80" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- ARROWS - LAYER 1 to 2 -->
+        <!-- ================================================================================ -->
+        <mxCell id="arr-video-mosei" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82B366;" edge="1" parent="1" source="video-in" target="v-mosei">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-audio-mosei" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82B366;" edge="1" parent="1" source="audio-in" target="a-mosei">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-text-mosei" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82B366;" edge="1" parent="1" source="text-in" target="t-mosei">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-video-mosi" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#D79B00;" edge="1" parent="1" source="video-in" target="v-mosi-extract">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-audio-mosi" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#D79B00;" edge="1" parent="1" source="audio-in" target="a-mosi-extract">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Visual Path Arrows -->
+        <mxCell id="arr-v-extract" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#D79B00;" edge="1" parent="1" source="v-mosi-extract" target="v-mosi-feat">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-v-adapter" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#6C8EBF;" edge="1" parent="1" source="v-mosi-feat" target="v-adapter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Audio Path Arrows -->
+        <mxCell id="arr-a-extract" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#D79B00;" edge="1" parent="1" source="a-mosi-extract" target="a-mosi-feat">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- ARROWS - LAYER 2 to 3 -->
+        <!-- ================================================================================ -->
+        <mxCell id="arr-v-enc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="v-mosei" target="v-encoder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-a-enc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="a-mosei" target="a-encoder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-t-enc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="t-mosei" target="t-encoder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-v-adapter-enc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6C8EBF;dashed=1;" edge="1" parent="1" source="v-adapter" target="v-encoder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- ARROWS - LAYER 3 to 4 -->
+        <!-- ================================================================================ -->
+        <mxCell id="arr-enc-attn" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="v-encoder" target="attn-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-enc-attn2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="a-encoder" target="attn-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-enc-attn3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="t-encoder" target="attn-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-attn-concat" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="attn-box" target="concat-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="arr-concat-fusion" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" edge="1" parent="1" source="concat-box" target="fusion-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- ================================================================================ -->
+        <!-- ARROWS - OUTPUT -->
+        <!-- ================================================================================ -->
+        <mxCell id="arr-fusion-output" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#82B366;" edge="1" parent="1" source="fusion-box" target="output-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+
+
+
+

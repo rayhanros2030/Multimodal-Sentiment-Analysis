@@ -413,3 +413,6 @@ Text (300) → Encoder → Embedding (96) ──┘
 - OpenFace2: Pre-optimized AUs
 - Facemesh: More control, need proper feature extraction
 
+
+
+

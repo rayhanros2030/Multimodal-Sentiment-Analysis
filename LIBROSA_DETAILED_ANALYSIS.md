@@ -310,3 +310,6 @@ Your current librosa implementation:
 
 The 74-dimension is for **model compatibility** with CMU-MOSEI COVAREP, not for temporal alignment with 30-frame visual timeline.
 
+
+
+
